@@ -1,0 +1,60 @@
+# Tasks
+
+- [x] Analyze `imagy.app` data from JSON <!-- id: 0 -->
+    - [x] Inspect JSON structure <!-- id: 1 -->
+    - [x] Extract infrastructure details <!-- id: 2 -->
+    - [x] Identify scripts and libraries <!-- id: 3 -->
+    - [x] Analyze data model/content <!-- id: 4 -->
+- [x] Extract Metadata via CLI <!-- id: 5 -->
+    - [x] Fetch Server Headers <!-- id: 6 -->
+    - [x] Download Homepage HTML <!-- id: 7 -->
+    - [x] Grep for Plugins & Scripts <!-- id: 8 -->
+    - [x] Update Analysis Artifact <!-- id: 9 -->
+- [x] Extract Feature Set <!-- id: 10 -->
+    - [x] Search for 'Tools' or 'Apps' in HTML <!-- id: 11 -->
+    - [x] Grep JSON for Conversion/Editing Keywords <!-- id: 12 -->
+    - [x] Categorize as Tutorials vs Live Tools <!-- id: 13 -->
+    - [x] document 'PhotoCon' Feature Roadmap <!-- id: 14 -->
+- [x] Scaffold PhotoCon Project <!-- id: 15 -->
+    - [x] Create Implementation Plan (Stack Decision) <!-- id: 16 -->
+    - [x] Initialize Next.js Project <!-- id: 17 -->
+    - [x] Configure Tailwind & Shadcn/UI <!-- id: 18 -->
+    - [x] Setup Rust/Wasm Environment (Stub) <!-- id: 19 -->
+- [x] Implement Client-Side Image Tools (Phase 1) <!-- id: 20 -->
+    - [x] Create Reusable 'ToolShell' Component <!-- id: 21 -->
+    - [x] Implement Image Uploader & Canvas State <!-- id: 22 -->
+    - [x] Build 'Flip Image' Tool <!-- id: 23 -->
+    - [x] Build 'Rotate Image' Tool <!-- id: 24 -->
+    - [x] Build 'Crop Image' Tool <!-- id: 25 -->
+- [x] Implement Server-Side Converters (Phase 2) <!-- id: 26 -->
+    - [x] Create Implementation Plan for File Conversion <!-- id: 27 -->
+    - [x] Install `pdfjs-dist` and `canvas` <!-- id: 28 -->
+    - [x] Create API Route for File Upload & Processing (`/api/convert`) <!-- id: 29 -->
+    - [x] Build 'PDF to Image' Tool Page <!-- id: 30 -->
+    - [x] Fix PDF Worker Build Error (Next.js Config) <!-- id: 31 -->
+- [x] Implement Navigation <!-- id: 32 -->
+    - [x] Create Responsive Navbar Component <!-- id: 33 -->
+    - [x] Integrate Navbar into Root Layout <!-- id: 34 -->
+- [x] Implement Bulk Image Resizer (Phase 3) <!-- id: 35 -->
+    - [x] Install `jszip` <!-- id: 36 -->
+    - [x] Create `BulkResizer` Component with Multi-File Logic <!-- id: 37 -->
+    - [x] Build '/resize-image' Page <!-- id: 38 -->
+    - [x] Verify Bulk Processing & Zip Download <!-- id: 39 -->
+- [x] Implement Modern Landing Page <!-- id: 40 -->
+    - [x] Install `framer-motion` <!-- id: 41 -->
+    - [x] Design Hero Section with Animations <!-- id: 42 -->
+    - [x] Build Features Grid (Navigational) <!-- id: 43 -->
+    - [x] Verify Responsive Design <!-- id: 44 -->
+- [x] Fix Bulk Resizer & UI <!-- id: 45 -->
+    - [x] Install `heic2any` for HEIC support <!-- id: 46 -->
+    - [x] Fix .jpeg vs .jpg extension issue <!-- id: 47 -->
+- [x] Fix Settings UI (Segmented Control) <!-- id: 48 -->
+
+- [x] Implement Advanced Core (Phase 4 - WASM) <!-- id: 49 -->
+    - [x] Research & Integrate `imagemagick-wasm` <!-- id: 50 -->
+    - [x] Create Universal Image Converter (RAW/TIFF/SVG) <!-- id: 51 -->
+    - [x] Build Advanced Compressor (Target File Size) <!-- id: 52 -->
+
+- [ ] Implement Creative Tools (Phase 5) <!-- id: 53 -->
+    - [ ] Build Split Image Tool (Grid Maker) <!-- id: 54 -->
+    - [ ] Build Watermark Tool <!-- id: 55 -->
