@@ -12,7 +12,8 @@ import {
     ArrowUpRight,
     RefreshCw,
     Layers,
-    Maximize2
+    Maximize2,
+    Grid3X3
 } from 'lucide-react';
 import { containerVariants, cardVariants } from '@/lib/animations';
 
@@ -65,6 +66,13 @@ const tools = [
         icon: Crop,
         href: "/crop-image",
         color: "bg-gradient-to-br from-teal-500 to-cyan-500"
+    },
+    {
+        title: "Split Image",
+        desc: "Split your photos into a grid (e.g., 3x3, 2x2). Great for Instagram grids and puzzles.",
+        icon: Grid3X3,
+        href: "/split-image",
+        color: "bg-gradient-to-br from-pink-500 to-rose-500"
     }
 ];
 

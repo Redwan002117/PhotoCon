@@ -8,7 +8,8 @@ import {
     RotateCw,
     Crop,
     FileType,
-    Image as ImageIcon
+    Image as ImageIcon,
+    Grid3X3
 } from 'lucide-react';
 import {
     DropdownMenu,
@@ -59,6 +60,12 @@ export const Navbar = () => {
                         <Button variant="ghost" className="text-slate-600">
                             <ImageIcon className="w-4 h-4 mr-2" />
                             Bulk Resize
+                        </Button>
+                    </Link>
+                    <Link href="/split-image">
+                        <Button variant="ghost" className="text-slate-600">
+                            <Grid3X3 className="w-4 h-4 mr-2" />
+                            Split Image
                         </Button>
                     </Link>
                 </div>

@@ -8,11 +8,8 @@ export const metadata = {
 
 export default function AllToolsPage() {
     return (
-        <ToolShell
-            title="All-in-One Image Tool"
-            description="Convert formats, compress to target size, resize dimensions, rotate angles, flip directions - all in one place. 100% private, client-side processing."
-        >
+        <main className="h-[calc(100vh-65px)] overflow-hidden bg-slate-50 relative">
             <UnifiedImageTool />
-        </ToolShell>
+        </main>
     );
 }

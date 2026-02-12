@@ -106,11 +106,24 @@ export default function UnifiedImageTool() {
     const [selectedFilter, setSelectedFilter] = useState("none");
 
     // Watermark settings
+    const [watermarkType, setWatermarkType] = useState<"text" | "image">("text");
     const [watermarkText, setWatermarkText] = useState("");
-    const [watermarkSize, setWatermarkSize] = useState(30);
+    const [watermarkImage, setWatermarkImage] = useState<HTMLImageElement | null>(null);
+    const [watermarkSize, setWatermarkSize] = useState(30); // For text: px, For image: % scale
     const [watermarkColor, setWatermarkColor] = useState("#ffffff");
     const [watermarkOpacity, setWatermarkOpacity] = useState(50);
     const [watermarkPosition, setWatermarkPosition] = useState("bottom-right");
+
+    const handleWatermarkImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (file) {
+            const img = new Image();
+            img.src = URL.createObjectURL(file);
+            img.onload = () => {
+                setWatermarkImage(img);
+            };
+        }
+    };
 
     const updatePreview = useCallback(async () => {
         if (files.length === 0 || !files[0].file) {
@@ -136,7 +149,7 @@ export default function UnifiedImageTool() {
         resizeMode, resizePercentage, resizeWidth, resizeHeight,
         rotateAngle, flipDirection, crop, completedCrop,
         brightness, contrast, saturation, selectedFilter,
-        watermarkText, watermarkSize, watermarkColor, watermarkOpacity, watermarkPosition
+        watermarkType, watermarkText, watermarkImage, watermarkSize, watermarkColor, watermarkOpacity, watermarkPosition
     ]);
 
     useEffect(() => {
@@ -173,10 +186,12 @@ export default function UnifiedImageTool() {
                 context.fillStyle = '#FFFFFF';
                 context.fillRect(0, 0, canvas.width, canvas.height);
 
-                await page.render({
+                const renderTask = page.render({
                     canvasContext: context as any,
-                    viewport
-                }).promise;
+                    viewport,
+                    canvas: canvas as any
+                });
+                await renderTask.promise;
 
                 const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'));
                 if (blob) {
@@ -396,11 +411,42 @@ export default function UnifiedImageTool() {
 
                 // 7. Export to Blob
                 const outputFormat = mode === "convert" ? targetFormat : "png";
-                canvas.toBlob((blob) => {
-                    URL.revokeObjectURL(url);
-                    if (blob) resolve(blob);
-                    else reject(new Error("Failed to create blob"));
-                }, `image/${outputFormat}`);
+                const needsMagick = ["tiff", "bmp", "pdf", "gif", "avif"].includes(outputFormat);
+
+                if (needsMagick) {
+                    canvas.toBlob(async (blob) => {
+                        if (!blob) {
+                            reject(new Error("Failed to create blob"));
+                            return;
+                        }
+
+                        // Revoke source URL immediately to free memory
+                        URL.revokeObjectURL(url);
+
+                        try {
+                            const file = new File([blob], "temp.png", { type: "image/png" });
+                            let formatEnum: MagickFormat = MagickFormat.Jpg;
+                            switch (outputFormat) {
+                                case "tiff": formatEnum = MagickFormat.Tiff; break;
+                                case "bmp": formatEnum = MagickFormat.Bmp; break;
+                                case "pdf": formatEnum = MagickFormat.Pdf; break;
+                                case "gif": formatEnum = MagickFormat.Gif; break;
+                                case "avif": formatEnum = MagickFormat.Avif; break;
+                            }
+
+                            const magickBlob = await convertFile(file, formatEnum);
+                            resolve(magickBlob);
+                        } catch (err) {
+                            reject(err);
+                        }
+                    }, 'image/png');
+                } else {
+                    canvas.toBlob((blob) => {
+                        URL.revokeObjectURL(url);
+                        if (blob) resolve(blob);
+                        else reject(new Error("Failed to create blob"));
+                    }, `image/${outputFormat}`);
+                }
             };
 
             img.onerror = () => {
@@ -441,42 +487,45 @@ export default function UnifiedImageTool() {
     };
 
     const applyWatermark = (canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D) => {
-        if (!watermarkText) return;
-
-        ctx.font = `bold ${watermarkSize}px Inter, system-ui, sans-serif`;
-        ctx.fillStyle = watermarkColor;
         ctx.globalAlpha = watermarkOpacity / 100;
-        ctx.textBaseline = "middle";
 
-        const metrics = ctx.measureText(watermarkText);
         const padding = 20;
         let x = 0;
         let y = 0;
 
-        switch (watermarkPosition) {
-            case "top-left":
-                x = padding;
-                y = padding + watermarkSize / 2;
-                break;
-            case "top-right":
-                x = canvas.width - metrics.width - padding;
-                y = padding + watermarkSize / 2;
-                break;
-            case "bottom-left":
-                x = padding;
-                y = canvas.height - watermarkSize / 2 - padding;
-                break;
-            case "bottom-right":
-                x = canvas.width - metrics.width - padding;
-                y = canvas.height - watermarkSize / 2 - padding;
-                break;
-            case "center":
-                x = (canvas.width - metrics.width) / 2;
-                y = canvas.height / 2;
-                break;
+        if (watermarkType === "text" && watermarkText) {
+            ctx.font = `bold ${watermarkSize}px Inter, system-ui, sans-serif`;
+            ctx.fillStyle = watermarkColor;
+            ctx.textBaseline = "middle";
+
+            const metrics = ctx.measureText(watermarkText);
+            const w = metrics.width;
+            const h = watermarkSize; // Approx
+
+            // Position Logic
+            if (watermarkPosition === "top-left") { x = padding; y = padding + h / 2; }
+            else if (watermarkPosition === "top-right") { x = canvas.width - w - padding; y = padding + h / 2; }
+            else if (watermarkPosition === "bottom-left") { x = padding; y = canvas.height - h / 2 - padding; }
+            else if (watermarkPosition === "bottom-right") { x = canvas.width - w - padding; y = canvas.height - h / 2 - padding; }
+            else if (watermarkPosition === "center") { x = (canvas.width - w) / 2; y = canvas.height / 2; }
+
+            ctx.fillText(watermarkText, x, y);
+
+        } else if (watermarkType === "image" && watermarkImage) {
+            const scale = watermarkSize / 100; // Treat size as percentage scale
+            const w = watermarkImage.width * scale;
+            const h = watermarkImage.height * scale;
+
+            // Position Logic
+            if (watermarkPosition === "top-left") { x = padding; y = padding; }
+            else if (watermarkPosition === "top-right") { x = canvas.width - w - padding; y = padding; }
+            else if (watermarkPosition === "bottom-left") { x = padding; y = canvas.height - h - padding; }
+            else if (watermarkPosition === "bottom-right") { x = canvas.width - w - padding; y = canvas.height - h - padding; }
+            else if (watermarkPosition === "center") { x = (canvas.width - w) / 2; y = (canvas.height - h) / 2; }
+
+            ctx.drawImage(watermarkImage, x, y, w, h);
         }
 
-        ctx.fillText(watermarkText, x, y);
         ctx.globalAlpha = 1.0; // Reset
     };
 
@@ -562,49 +611,62 @@ export default function UnifiedImageTool() {
     const isReady = mode === "compress" ? compressorReady : magickReady;
 
     return (
-        <div className="h-full flex flex-col min-h-0 bg-white">
-            <Tabs value={mode} onValueChange={(v) => setMode(v as ToolMode)} className="flex-1 flex flex-col lg:flex-row overflow-hidden" orientation="vertical">
-                {/* Sidebar Modes Bar */}
-                <TabsList className="flex flex-row lg:flex-col h-14 lg:h-full w-full lg:w-[72px] bg-slate-900 p-2 gap-3 shrink-0 rounded-none border-b lg:border-b-0 lg:border-r overflow-x-auto lg:overflow-y-auto no-scrollbar items-center lg:items-center">
+        <div className="h-full flex flex-col md:flex-row bg-slate-50 overflow-hidden">
+            <Tabs value={mode} onValueChange={(v) => setMode(v as ToolMode)} className="flex-1 flex flex-col md:flex-row overflow-hidden" orientation="vertical">
+                {/* Sidebar Navigation */}
+                <TabsList className="flex flex-row md:flex-col h-16 md:h-full w-full md:w-[80px] bg-slate-900 p-2 gap-2 md:gap-4 shrink-0 rounded-none border-b md:border-b-0 md:border-r border-slate-800 overflow-x-auto md:overflow-y-auto no-scrollbar items-center md:py-6">
                     {[
                         { value: "convert", icon: FileType, label: "Convert" },
                         { value: "compress", icon: RefreshCw, label: "Compress" },
                         { value: "resize", icon: Maximize2, label: "Resize" },
+                        { value: "crop", icon: Scissors, label: "Crop" },
                         { value: "rotate", icon: RotateCw, label: "Rotate" },
                         { value: "flip", icon: FlipHorizontal, label: "Flip" },
-                        { value: "crop", icon: Scissors, label: "Crop" },
                         { value: "adjust", icon: Sliders, label: "Adjust" },
                         { value: "filter", icon: Palette, label: "Filter" },
-                        { value: "watermark", icon: Type, label: "Text" },
+                        { value: "watermark", icon: Type, label: "Watermark" },
                     ].map((t) => (
                         <TabsTrigger
                             key={t.value}
                             value={t.value}
-                            className="flex flex-col items-center justify-center gap-1.5 w-10 lg:w-full aspect-square p-0 data-[state=active]:bg-primary data-[state=active]:text-white text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-all rounded-lg lg:rounded-xl shrink-0"
+                            className="group flex flex-col items-center justify-center gap-1.5 w-12 md:w-16 aspect-square p-0 data-[state=active]:bg-primary/20 data-[state=active]:text-primary text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition-all rounded-xl shrink-0 relative"
                             title={t.label}
                         >
-                            <t.icon className="w-5 h-5" />
-                            <span className="text-[10px] font-bold opacity-80">{t.label}</span>
+                            <t.icon className="w-5 h-5 md:w-6 md:h-6 transition-transform group-hover:scale-110" />
+                            <span className="text-[9px] font-medium opacity-70 group-hover:opacity-100">{t.label}</span>
+                            {/* Active Indicator Line */}
+                            <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-8 bg-primary rounded-r-full opacity-0 data-[state=active]:opacity-100 transition-opacity hidden md:block" />
                         </TabsTrigger>
                     ))}
                 </TabsList>
 
-                {/* Main Viewport (Preview Area) */}
-                <div className="flex-1 bg-slate-100 flex flex-col min-w-0 border-r-0 lg:border-r relative overflow-hidden min-h-[40vh] lg:min-h-0">
-                    <div className="p-3 border-b bg-white/80 backdrop-blur-sm flex items-center justify-between sticky top-0 z-10 shrink-0">
-                        <div className="flex items-center gap-2">
-                            <ImageIcon className="w-4 h-4 text-slate-400" />
-                            <h3 className="text-[11px] font-bold text-slate-600 uppercase tracking-wider">Live Preview</h3>
-                        </div>
-                        {isPreviewProcessing && (
-                            <div className="flex items-center gap-2 text-[10px] text-primary font-bold animate-pulse">
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                                UPDATING...
+                {/* Main Viewport (Canvas Area) */}
+                <div className="flex-1 bg-slate-100/50 flex flex-col min-w-0 relative overflow-hidden">
+                    {/* Toolbar / Header */}
+                    <div className="h-14 px-6 border-b bg-white flex items-center justify-between shrink-0 shadow-sm z-10">
+                        <div className="flex items-center gap-3">
+                            <div className="p-1.5 bg-primary/10 rounded-lg text-primary">
+                                <ImageIcon className="w-4 h-4" />
                             </div>
-                        )}
+                            <div>
+                                <h2 className="text-sm font-bold text-slate-800 uppercase tracking-wide">
+                                    {mode} Image
+                                </h2>
+                            </div>
+                        </div>
+
+                        <div className="flex items-center gap-4">
+                            {isPreviewProcessing && (
+                                <div className="flex items-center gap-2 text-[10px] text-primary font-bold animate-pulse px-3 py-1 bg-primary/5 rounded-full">
+                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                    PROCESSING...
+                                </div>
+                            )}
+                        </div>
                     </div>
 
-                    <div className="flex-1 overflow-hidden p-4 lg:p-8 flex items-center justify-center">
+                    {/* Canvas Scroll Area */}
+                    <div className="flex-1 overflow-auto p-4 md:p-8 flex items-center justify-center relative bg-[url('https://www.transparenttextures.com/patterns/checkerboard.png')]">
                         <AnimatePresence mode="wait">
                             {previewUrl ? (
                                 <motion.div
@@ -613,27 +675,29 @@ export default function UnifiedImageTool() {
                                     animate={{ opacity: 1, scale: 1 }}
                                     exit={{ opacity: 0, scale: 1.05 }}
                                     transition={{ duration: 0.2 }}
-                                    className="relative max-w-full max-h-full flex items-center justify-center"
+                                    className="relative max-w-full max-h-full flex items-center justify-center shadow-2xl rounded-lg overflow-hidden ring-1 ring-slate-900/5"
                                 >
                                     <img
                                         src={previewUrl}
                                         alt="Preview"
-                                        className="max-w-full max-h-[40vh] lg:max-h-[calc(100vh-200px)] object-contain shadow-2xl rounded-lg bg-white bg-[url('https://www.transparenttextures.com/patterns/checkerboard.png')]"
+                                        className="max-w-full max-h-[calc(100vh-200px)] object-contain bg-white"
                                     />
-                                    <div className="absolute -bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-4 bg-white/90 backdrop-blur-md px-4 py-1.5 rounded-full shadow-lg border border-slate-200 text-[10px] font-bold text-slate-500 whitespace-nowrap">
-                                        <span>PROCESSED PREVIEW</span>
-                                    </div>
                                 </motion.div>
                             ) : (
                                 <motion.div
-                                    initial={{ opacity: 0 }}
-                                    animate={{ opacity: 1 }}
-                                    className="text-center space-y-4"
+                                    initial={{ opacity: 0, y: 10 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    className="text-center space-y-6 max-w-md"
                                 >
-                                    <div className="w-20 h-20 bg-slate-200 rounded-full flex items-center justify-center mx-auto mb-4">
-                                        <Upload className="w-8 h-8 text-slate-400" />
+                                    <div className="w-24 h-24 bg-white rounded-3xl flex items-center justify-center mx-auto shadow-sm border border-slate-100">
+                                        <Upload className="w-10 h-10 text-slate-300" />
                                     </div>
-                                    <p className="text-slate-400 text-sm font-medium">Upload an image to see live preview</p>
+                                    <div>
+                                        <h3 className="text-xl font-bold text-slate-800">No Image Selected</h3>
+                                        <p className="text-slate-500 text-sm mt-2">
+                                            Upload an image from the right panel to start editing.
+                                        </p>
+                                    </div>
                                 </motion.div>
                             )}
                         </AnimatePresence>
@@ -641,28 +705,23 @@ export default function UnifiedImageTool() {
                 </div>
 
                 {/* Right Sidebar (Settings & Queue) */}
-                <div className="w-full lg:w-[380px] h-[50vh] lg:h-full flex flex-col min-w-0 bg-white shadow-2xl z-20 overflow-hidden border-t lg:border-t-0 lg:border-l">
-                    <div className="p-4 border-b bg-slate-50/50 flex items-center justify-between shrink-0">
-                        <h3 className="text-xs font-black text-slate-500 uppercase tracking-[0.2em] px-1">Tool Settings</h3>
-                        {isReady && (
-                            <motion.div
-                                initial={{ opacity: 0, scale: 0.8 }}
-                                animate={{ opacity: 1, scale: 1 }}
-                                className="flex items-center gap-1.5 text-green-600 text-[10px] font-black bg-green-50 px-2 py-0.5 rounded-full border border-green-100"
-                            >
-                                <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
-                                READY
-                            </motion.div>
-                        )}
-                        {!isReady && (
-                            <div className="flex items-center gap-1.5 text-amber-600 text-[10px] font-black bg-amber-50 px-2 py-0.5 rounded-full border border-amber-100">
+                <div className="w-full md:w-[360px] lg:w-[400px] h-[40vh] md:h-full flex flex-col min-w-0 bg-white shadow-xl z-20 overflow-hidden border-t md:border-t-0 md:border-l border-slate-200">
+                    <div className="p-5 border-b flex items-center justify-between shrink-0 bg-white">
+                        <h3 className="font-bold text-slate-800">Configuration</h3>
+                        {isReady ? (
+                            <span className="flex items-center gap-1.5 text-[10px] font-bold text-green-600 bg-green-50 px-2.5 py-1 rounded-full border border-green-100">
+                                <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
+                                ENGINE READY
+                            </span>
+                        ) : (
+                            <span className="flex items-center gap-1.5 text-[10px] font-bold text-amber-600 bg-amber-50 px-2.5 py-1 rounded-full border border-amber-100">
                                 <Loader2 className="w-3 h-3 animate-spin" />
-                                LOADING...
-                            </div>
+                                LOADING WASM...
+                            </span>
                         )}
                     </div>
 
-                    <div className="flex-1 overflow-y-auto no-scrollbar p-5 space-y-8">
+                    <div className="flex-1 overflow-y-auto p-6 space-y-8 custom-scrollbar">
                         <TabsContent value="convert" className="mt-0 focus-visible:outline-none">
                             <div className="grid grid-cols-1 gap-5">
                                 <div className="space-y-2">
@@ -1008,16 +1067,52 @@ export default function UnifiedImageTool() {
                         </TabsContent>
 
                         <TabsContent value="watermark" className="mt-0 focus-visible:outline-none">
-                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-6 items-end">
-                                <div className="space-y-2 lg:col-span-1">
-                                    <Label className="font-semibold text-slate-700">Text Content</Label>
-                                    <Input
-                                        className="h-11 bg-white"
-                                        placeholder="Watermark text..."
-                                        value={watermarkText}
-                                        onChange={(e) => setWatermarkText(e.target.value)}
-                                    />
+                            <div className="grid grid-cols-1 gap-6">
+                                {/* Type Toggle */}
+                                <div className="grid grid-cols-2 gap-1 p-1 bg-slate-100 rounded-lg">
+                                    <button
+                                        onClick={() => setWatermarkType("text")}
+                                        className={`py-2 text-xs font-bold rounded-md transition-all ${watermarkType === "text" ? "bg-white text-primary shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                                    >
+                                        Text Watermark
+                                    </button>
+                                    <button
+                                        onClick={() => setWatermarkType("image")}
+                                        className={`py-2 text-xs font-bold rounded-md transition-all ${watermarkType === "image" ? "bg-white text-primary shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                                    >
+                                        Image Logo
+                                    </button>
                                 </div>
+
+                                {watermarkType === "text" ? (
+                                    <div className="space-y-2">
+                                        <Label className="font-semibold text-slate-700">Text Content</Label>
+                                        <Input
+                                            className="h-11 bg-white"
+                                            placeholder="Watermark text..."
+                                            value={watermarkText}
+                                            onChange={(e) => setWatermarkText(e.target.value)}
+                                        />
+                                    </div>
+                                ) : (
+                                    <div className="space-y-2">
+                                        <Label className="font-semibold text-slate-700">Upload Logo</Label>
+                                        <div className="relative">
+                                            <Input
+                                                type="file"
+                                                accept="image/*"
+                                                className="h-11 bg-white pt-2 file:mr-4 file:py-1 file:px-2 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-primary/10 file:text-primary hover:file:bg-primary/20"
+                                                onChange={handleWatermarkImageUpload}
+                                            />
+                                        </div>
+                                        {watermarkImage && (
+                                            <p className="text-[10px] text-green-600 font-bold flex items-center gap-1">
+                                                <CheckCircle2 className="w-3 h-3" /> Image Loaded
+                                            </p>
+                                        )}
+                                    </div>
+                                )}
+
                                 <div className="space-y-2">
                                     <Label className="font-semibold text-slate-700">Placement</Label>
                                     <Select value={watermarkPosition} onValueChange={setWatermarkPosition}>
@@ -1033,19 +1128,35 @@ export default function UnifiedImageTool() {
                                         </SelectContent>
                                     </Select>
                                 </div>
+
                                 <div className="space-y-4 px-2">
-                                    <Label className="font-semibold text-slate-700 text-xs">Size ({watermarkSize}px)</Label>
-                                    <Slider value={[watermarkSize]} min={10} max={200} step={1} onValueChange={([v]) => setWatermarkSize(v)} />
+                                    <div className="flex justify-between">
+                                        <Label className="font-semibold text-slate-700 text-xs">
+                                            {watermarkType === "text" ? "Font Size" : "Image Scale"}
+                                        </Label>
+                                        <span className="text-xs font-mono text-slate-500">
+                                            {watermarkSize}{watermarkType === "text" ? "px" : "%"}
+                                        </span>
+                                    </div>
+                                    <Slider value={[watermarkSize]} min={5} max={100} step={1} onValueChange={([v]) => setWatermarkSize(v)} />
                                 </div>
+
                                 <div className="space-y-4 px-2">
-                                    <Label className="font-semibold text-slate-700 text-xs">Opacity ({watermarkOpacity}%)</Label>
+                                    <div className="flex justify-between">
+                                        <Label className="font-semibold text-slate-700 text-xs">Opacity</Label>
+                                        <span className="text-xs font-mono text-slate-500">{watermarkOpacity}%</span>
+                                    </div>
                                     <Slider value={[watermarkOpacity]} min={0} max={100} step={1} onValueChange={([v]) => setWatermarkOpacity(v)} />
                                 </div>
-                                <div className="sm:col-span-2 lg:col-span-2">
+
+                                <div className="sm:col-span-2 lg:col-span-2 pt-2">
                                     <Button className="w-full h-11 font-bold shadow-sm" onClick={processFiles} disabled={isProcessing || files.length === 0}>
                                         {isProcessing ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
-                                        Add Watermark & Process
+                                        Process Key
                                     </Button>
+                                    <p className="text-[10px] text-center text-slate-400 mt-2">
+                                        Applies watermark and selected output format
+                                    </p>
                                 </div>
                             </div>
                         </TabsContent>

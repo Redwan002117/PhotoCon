@@ -1,0 +1,22 @@
+
+> photocon@0.1.0 build
+> next build
+
+▲ Next.js 16.1.6 (Turbopack)
+
+  Creating an optimized production build ...
+✓ Compiled successfully in 6.7s
+  Running TypeScript ...
+Failed to compile.
+
+./components/tools/UnifiedImageTool.tsx:430:46
+Type error: Type '"TIFF"' is not assignable to type '"JPG"'.
+
+[0m [90m 428 |[39m                             [36mlet[39m formatEnum [33m=[39m [33mMagickFormat[39m[33m.[39m[33mJpg[39m[33m;[39m
+ [90m 429 |[39m                             [36mswitch[39m (outputFormat) {
+[31m[1m>[22m[39m[90m 430 |[39m                                 [36mcase[39m [32m"tiff"[39m[33m:[39m formatEnum [33m=[39m [33mMagickFormat[39m[33m.[39m[33mTiff[39m[33m;[39m [36mbreak[39m[33m;[39m
+ [90m     |[39m                                              [31m[1m^[22m[39m
+ [90m 431 |[39m                                 [36mcase[39m [32m"bmp"[39m[33m:[39m formatEnum [33m=[39m [33mMagickFormat[39m[33m.[39m[33mBmp[39m[33m;[39m [36mbreak[39m[33m;[39m
+ [90m 432 |[39m                                 [36mcase[39m [32m"pdf"[39m[33m:[39m formatEnum [33m=[39m [33mMagickFormat[39m[33m.[39m[33mPdf[39m[33m;[39m [36mbreak[39m[33m;[39m
+ [90m 433 |[39m                                 [36mcase[39m [32m"gif"[39m[33m:[39m formatEnum [33m=[39m [33mMagickFormat[39m[33m.[39m[33mGif[39m[33m;[39m [36mbreak[39m[33m;[39m[0m
+Next.js build worker exited with code: 1 and signal: null

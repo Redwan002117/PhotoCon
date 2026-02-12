@@ -1,7 +1,7 @@
 # PhotoCon Project Status 🚀
 
-**Current Phase**: Phase 2 - Server-Side Converters
-**Last Updated**: 2026-02-11
+**Current Phase**: Phase 5 - Creative Tools
+**Last Updated**: 2026-02-12
 
 ## 📂 Documentation (Docs/)
 This directory serves as the single source of truth for the project.
@@ -18,11 +18,19 @@ This directory serves as the single source of truth for the project.
     *   Flip Image (Horizontal/Vertical)
     *   Rotate Image (Fixed/Free)
     *   Crop Image (Interactive)
-
-## 🚧 In Progress
 *   **Server-Side Converters**:
     *   PDF to Image conversion.
     *   High-performance image format conversion (AVIF/WebP).
+*   **Bulk Image Resizer**:
+    *   Client-side bulk resizing with JSZip.
+*   **Advanced Core (WASM)**:
+    *   Universal Image Converter (RAW/TIFF/SVG to modern formats).
+    *   Advanced Compressor (Target File Size).
+
+## 🚧 In Progress
+*   **Creative Tools**:
+    *   Split Image (Grid Maker).
+    *   Watermark Tool.
 
 ## 🔮 Upcoming
 *   **AI Features**: Background removal, face blurring.
