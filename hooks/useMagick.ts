@@ -11,16 +11,26 @@ export { MagickFormat };
 
 export function useMagick() {
     const [isReady, setIsReady] = useState(false);
+    const [isInitializing, setIsInitializing] = useState(false);
+    const [loadProgress, setLoadProgress] = useState(0);
     const [error, setError] = useState<string | null>(null);
     const initialized = useRef(false);
+    const initPromise = useRef<Promise<void> | null>(null);
 
-    useEffect(() => {
-        if (initialized.current) return;
+    const initializeMagick = async () => {
+        // If already initialized or initializing, return existing promise
+        if (initialized.current) return Promise.resolve();
+        if (initPromise.current) return initPromise.current;
+
         initialized.current = true;
+        setIsInitializing(true);
+        setLoadProgress(0);
 
-        const loadMagick = async () => {
+        initPromise.current = (async () => {
             try {
-                // Fetch the WASM file as a response, then get arrayBuffer
+                console.log("🔄 Loading ImageMagick WASM...");
+
+                // Fetch the WASM file with progress tracking
                 const wasmUrl = "/wasm/magick.wasm";
                 const response = await fetch(wasmUrl);
 
@@ -28,21 +38,64 @@ export function useMagick() {
                     throw new Error(`Failed to fetch WASM file: ${response.statusText}`);
                 }
 
-                const wasmBytes = await response.arrayBuffer();
+                // Get content length for progress calculation
+                const contentLength = response.headers.get('content-length');
+                const total = parseInt(contentLength || '0', 10);
 
+                if (!response.body) {
+                    throw new Error('No response body');
+                }
+
+                // Read stream with progress tracking
+                const reader = response.body.getReader();
+                let receivedLength = 0;
+                const chunks: Uint8Array[] = [];
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    chunks.push(value);
+                    receivedLength += value.length;
+
+                    // Update progress
+                    if (total > 0) {
+                        const progress = Math.round((receivedLength / total) * 100);
+                        setLoadProgress(progress);
+                        console.log(`📦 WASM Download: ${progress}%`);
+                    }
+                }
+
+                // Combine chunks into single array
+                const chunksAll = new Uint8Array(receivedLength);
+                let position = 0;
+                for (const chunk of chunks) {
+                    chunksAll.set(chunk, position);
+                    position += chunk.length;
+                }
+
+                console.log("⚙️ Initializing ImageMagick...");
                 // Initialize with the bytes
-                await initializeImageMagick(wasmBytes);
+                await initializeImageMagick(chunksAll.buffer);
 
                 console.log("✅ ImageMagick WASM Initialized");
                 setIsReady(true);
+                setIsInitializing(false);
             } catch (err: any) {
                 console.error("❌ Failed to load ImageMagick WASM:", err);
                 setError(err?.message || "Failed to load ImageMagick WebAssembly");
+                setIsInitializing(false);
+                initialized.current = false; // Allow retry
+                initPromise.current = null;
+                throw err;
             }
-        };
+        })();
 
-        loadMagick();
-    }, []);
+        return initPromise.current;
+    };
+
+    // Conditional loading - no auto-initialization
+    // WASM will be initialized when needed by specific tools
 
     const convertFile = async (
         file: File,
@@ -107,5 +160,5 @@ export function useMagick() {
         }
     };
 
-    return { isReady, error, convertFile };
+    return { isReady, isInitializing, loadProgress, error, convertFile, initializeMagick };
 }

@@ -11,7 +11,7 @@ export interface CompressionResult {
 }
 
 export function useImageCompressor() {
-    const { isReady, error } = useMagick();
+    const { isReady, isInitializing, loadProgress, error } = useMagick();
 
     const compressToSize = async (
         file: File,
@@ -35,62 +35,68 @@ export function useImageCompressor() {
                 try {
                     const array = new Uint8Array(data);
 
-                    ImageMagick.read(array, (image) => {
-                        const targetBytes = targetSizeKB * 1024;
-                        // Use higher quality range (60-95) for better visual quality
-                        let min = 60;
-                        let max = 95;
-                        let bestBlob: Blob | null = null;
-                        let bestQuality = 0;
-                        let bestDiff = Infinity;
-                        let iterations = 0;
+                    try {
+                        ImageMagick.read(array, (image) => {
+                            const targetBytes = targetSizeKB * 1024;
+                            // Use higher quality range (60-95) for better visual quality
+                            let min = 60;
+                            let max = 95;
+                            let bestBlob: Blob | null = null;
+                            let bestQuality = 0;
+                            let bestDiff = Infinity;
+                            let iterations = 0;
 
-                        // Binary search for closest size with high quality
-                        for (let i = 0; i < 10; i++) {
-                            iterations++;
-                            const currentQuality = Math.floor((min + max) / 2);
-                            image.quality = currentQuality;
+                            // Binary search for closest size with high quality
+                            for (let i = 0; i < 10; i++) {
+                                iterations++;
+                                const currentQuality = Math.floor((min + max) / 2);
+                                image.quality = currentQuality;
 
-                            let blobSize = 0;
-                            let blobData: Uint8Array | null = null;
+                                let blobSize = 0;
+                                let blobData: Uint8Array | null = null;
 
-                            image.write(format, (data) => {
-                                blobSize = data.length;
-                                blobData = data;
-                            });
+                                image.write(format, (data) => {
+                                    blobSize = data.length;
+                                    blobData = data;
+                                });
 
-                            if (!blobData) break;
+                                if (!blobData) break;
 
-                            const diff = Math.abs(blobSize - targetBytes);
+                                const diff = Math.abs(blobSize - targetBytes);
 
-                            if (diff < bestDiff) {
-                                bestDiff = diff;
-                                bestBlob = new Blob([blobData as any], { type: getMimeType(format) });
-                                bestQuality = currentQuality;
+                                if (diff < bestDiff) {
+                                    bestDiff = diff;
+                                    bestBlob = new Blob([blobData as any], { type: getMimeType(format) });
+                                    bestQuality = currentQuality;
+                                }
+
+                                if (blobSize > targetBytes) {
+                                    max = currentQuality - 1;
+                                } else {
+                                    min = currentQuality + 1;
+                                }
+
+                                if (min > max) break;
                             }
 
-                            if (blobSize > targetBytes) {
-                                max = currentQuality - 1;
+                            if (bestBlob) {
+                                resolve({
+                                    blob: bestBlob,
+                                    quality: bestQuality,
+                                    size: bestBlob.size,
+                                    iterations
+                                });
                             } else {
-                                min = currentQuality + 1;
+                                reject(new Error("Could not compress to target size"));
                             }
-
-                            if (min > max) break;
-                        }
-
-                        if (bestBlob) {
-                            resolve({
-                                blob: bestBlob,
-                                quality: bestQuality,
-                                size: bestBlob.size,
-                                iterations
-                            });
-                        } else {
-                            reject(new Error("Could not compress to target size"));
-                        }
-                    });
-                } catch (err) {
-                    console.error("Compression error:", err);
+                        });
+                    } catch (magickError: any) {
+                        console.error("ImageMagick Read Error:", magickError);
+                        // Catch CRC or other read errors
+                        reject(new Error(`Failed to process image: ${magickError.message || "Unknown error"} (CRC/Format)`));
+                    }
+                } catch (err: any) {
+                    console.error("Compression wrapper error:", err);
                     reject(err);
                 }
             };
@@ -109,5 +115,5 @@ export function useImageCompressor() {
         }
     };
 
-    return { isReady, error, compressToSize };
+    return { isReady, isInitializing, loadProgress, error, compressToSize };
 }

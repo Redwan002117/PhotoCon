@@ -12,29 +12,21 @@ if (typeof window !== "undefined" && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
 import { motion, AnimatePresence } from "framer-motion";
 import { useMagick, MagickFormat } from "@/hooks/useMagick";
 import { useImageCompressor } from "@/hooks/useImageCompressor";
-import ReactCrop, { centerCrop, makeAspectCrop, Crop, PixelCrop } from 'react-image-crop';
-import 'react-image-crop/dist/ReactCrop.css';
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Label } from "@/components/ui/label";
-import { Input } from "@/components/ui/input";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Progress } from "@/components/ui/progress";
-import { Slider } from "@/components/ui/slider";
-import {
-    Loader2, Upload, Download, Image as ImageIcon, X, CheckCircle2,
-    AlertCircle, Package, RefreshCw, Maximize2, RotateCw, FlipHorizontal,
-    FileType, Scissors, Sliders, Palette, Type, Wand2
-} from "lucide-react";
+import { centerCrop, makeAspectCrop, Crop, PixelCrop } from 'react-image-crop';
+import { Tabs } from "@/components/ui/tabs";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
-import { cardVariants, containerVariants, itemVariants } from "@/lib/animations";
+// heic2any imported dynamically to avoid SSR window error
+import { Sidebar } from "@/components/core/Sidebar";
+import { CanvasArea } from "@/components/core/CanvasArea";
+import { getOrientation } from "@/lib/utils/exif";
+import { SettingsPanel } from "@/components/core/SettingsPanel";
 
-type ToolMode = "convert" | "compress" | "resize" | "crop" | "rotate" | "flip" | "adjust" | "filter" | "watermark";
+type ToolMode = "convert" | "compress" | "resize" | "crop" | "rotate" | "flip" | "adjust" | "filter" | "watermark" | "split";
 
 interface FileWithStatus {
     file: File;
+    previewFile?: File; // Cached converted file for HEIC/TIFF
     status: "pending" | "processing" | "done" | "error";
     result?: Blob;
     outputName?: string;
@@ -53,8 +45,8 @@ const formatBytes = (bytes: number, decimals = 2) => {
 };
 
 export default function UnifiedImageTool() {
-    const { isReady: magickReady, convertFile } = useMagick();
-    const { isReady: compressorReady, compressToSize } = useImageCompressor();
+    const { isReady: magickReady, isInitializing: magickInitializing, loadProgress: magickProgress, initializeMagick, convertFile } = useMagick();
+    const { isReady: compressorReady, isInitializing: compressorInitializing, loadProgress: compressorProgress, compressToSize } = useImageCompressor();
 
     const [mode, setMode] = useState<ToolMode>("convert");
     const [files, setFiles] = useState<FileWithStatus[]>([]);
@@ -62,7 +54,9 @@ export default function UnifiedImageTool() {
     const [progress, setProgress] = useState(0);
     const [downloadMode, setDownloadMode] = useState<"individual" | "zip">("individual");
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+
     const [isPreviewProcessing, setIsPreviewProcessing] = useState(false);
+    const [selectedFileIndex, setSelectedFileIndex] = useState(0);
 
     // Convert settings
     const [targetFormat, setTargetFormat] = useState("jpg");
@@ -73,12 +67,12 @@ export default function UnifiedImageTool() {
 
     // Resize settings
     const [resizeMode, setResizeMode] = useState<"percentage" | "dimensions">("percentage");
-    const [resizePercentage, setResizePercentage] = useState(50);
+    const [resizePercentage, setResizePercentage] = useState(100);
     const [resizeWidth, setResizeWidth] = useState(800);
     const [resizeHeight, setResizeHeight] = useState(600);
 
     // Rotate settings
-    const [rotateAngle, setRotateAngle] = useState(90);
+    const [rotateAngle, setRotateAngle] = useState(0);
 
     // Flip settings
     const [flipDirection, setFlipDirection] = useState<"horizontal" | "vertical">("horizontal");
@@ -107,12 +101,29 @@ export default function UnifiedImageTool() {
 
     // Watermark settings
     const [watermarkType, setWatermarkType] = useState<"text" | "image">("text");
-    const [watermarkText, setWatermarkText] = useState("");
+    const [watermarkText, setWatermarkText] = useState("© PhotoCon");
     const [watermarkImage, setWatermarkImage] = useState<HTMLImageElement | null>(null);
     const [watermarkSize, setWatermarkSize] = useState(30); // For text: px, For image: % scale
     const [watermarkColor, setWatermarkColor] = useState("#ffffff");
     const [watermarkOpacity, setWatermarkOpacity] = useState(50);
     const [watermarkPosition, setWatermarkPosition] = useState("bottom-right");
+
+    // Split settings
+    const [splitRows, setSplitRows] = useState(3);
+    const [splitCols, setSplitCols] = useState(3);
+
+    // Tools that require WASM
+    const wasmTools: ToolMode[] = ['convert', 'resize', 'rotate', 'flip', 'crop', 'adjust', 'filter', 'watermark', 'split'];
+    const needsWasm = wasmTools.includes(mode);
+
+    // Conditional WASM initialization
+    useEffect(() => {
+        // Initialize WASM when user selects a tool that needs it
+        if (needsWasm && !magickReady && !magickInitializing) {
+            console.log(`🎯 Tool "${mode}" requires WASM, initializing...`);
+            initializeMagick();
+        }
+    }, [mode, needsWasm, magickReady, magickInitializing]);
 
     const handleWatermarkImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -126,30 +137,46 @@ export default function UnifiedImageTool() {
     };
 
     const updatePreview = useCallback(async () => {
-        if (files.length === 0 || !files[0].file) {
+        let active = true;
+
+        if (files.length === 0 || !files[selectedFileIndex]) {
             setPreviewUrl(null);
             return;
         }
 
+        const currentItem = files[selectedFileIndex];
+        const currentFile = currentItem.previewFile || currentItem.file; // Use cached preview if available
+
+        if (!currentFile) return;
+
         setIsPreviewProcessing(true);
         try {
-            const blob = await handleUnifiedPipeline(files[0].file);
+            // Note: handleUnifiedPipeline might trigger a conversion if previewFile isn't set yet
+            // We should ideally update the state if a conversion happens, but handleUnifiedPipeline is pure.
+            // For now, let's just rely on the pipeline.
+            const blob = await handleUnifiedPipeline(currentFile, true);
+
+            if (!active) return; // Ignore if component unmounted or index changed
+
             const url = URL.createObjectURL(blob);
             setPreviewUrl((prev) => {
                 if (prev) URL.revokeObjectURL(prev);
                 return url;
             });
         } catch (err) {
-            console.error("Preview processing error:", err);
+            if (active) console.error("Preview processing error:", err);
         } finally {
-            setIsPreviewProcessing(false);
+            if (active) setIsPreviewProcessing(false);
         }
+
+        return () => { active = false; };
     }, [
-        files, mode, targetFormat, targetSizeKB, compressFormat,
+        files, selectedFileIndex, mode, targetFormat, targetSizeKB, compressFormat,
         resizeMode, resizePercentage, resizeWidth, resizeHeight,
         rotateAngle, flipDirection, crop, completedCrop,
         brightness, contrast, saturation, selectedFilter,
-        watermarkType, watermarkText, watermarkImage, watermarkSize, watermarkColor, watermarkOpacity, watermarkPosition
+        watermarkType, watermarkText, watermarkImage, watermarkSize, watermarkColor, watermarkOpacity, watermarkPosition,
+        splitRows, splitCols
     ]);
 
     useEffect(() => {
@@ -207,12 +234,113 @@ export default function UnifiedImageTool() {
         return extractedFiles;
     };
 
+    const normalizeFile = async (file: File): Promise<File> => {
+        // 1. Handle HEIC/TIFF conversion
+        let processedFile = file;
+        const ext = file.name.split('.').pop()?.toLowerCase();
+        if (["heic", "heif"].includes(ext || "")) {
+            try {
+                // Dynamically import heic2any to avoid SSR window error
+                const heic2any = (await import("heic2any")).default;
+
+                // heic2any returns a Blob or Blob[]
+                const convertedBlob = await heic2any({
+                    blob: file,
+                    toType: "image/jpeg",
+                    quality: 0.9
+                });
+
+                const finalBlob = Array.isArray(convertedBlob) ? convertedBlob[0] : convertedBlob;
+                processedFile = new File(
+                    [finalBlob],
+                    file.name.replace(/\.[^/.]+$/, ".jpg"),
+                    { type: "image/jpeg" }
+                );
+            } catch (e) {
+                console.error("Normalization (HEIC) failed:", e);
+                return file;
+            }
+        }
+        // TIFF support via Magick (if supported) or other means. 
+        // For now, removing explicit TIFF check here unless we add a TIFF decoder.
+        // If heic2any supports it or we want to keep the old path for TIFF:
+        else if (["tiff", "tif"].includes(ext || "")) {
+            if (!magickReady) {
+                console.warn("Magick not ready, skipping TIFF conversion");
+                return file;
+            }
+            try {
+                const convertedBlob = await convertFile(file, MagickFormat.Png);
+                processedFile = new File([convertedBlob], file.name.replace(/\.[^/.]+$/, ".png"), { type: "image/png" });
+            } catch (e) {
+                console.error("Normalization (TIFF) failed:", e);
+                return file;
+            }
+        }
+
+        // 2. Handle EXIF Rotation using a temporary canvas
+        const orientation = await getOrientation(processedFile);
+        if (orientation > 1) {
+            return new Promise((resolve) => {
+                const img = new Image();
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
+                    if (!ctx) return resolve(processedFile);
+
+                    let width = img.width;
+                    let height = img.height;
+
+                    // Swap dimensions if 90/270 degrees
+                    if (orientation >= 5 && orientation <= 8) {
+                        width = img.height;
+                        height = img.width;
+                    }
+
+                    canvas.width = width;
+                    canvas.height = height;
+
+                    // Apply transform
+                    switch (orientation) {
+                        case 2: ctx.transform(-1, 0, 0, 1, width, 0); break;
+                        case 3: ctx.transform(-1, 0, 0, -1, width, height); break;
+                        case 4: ctx.transform(1, 0, 0, -1, 0, height); break;
+                        case 5: ctx.transform(0, 1, 1, 0, 0, 0); break;
+                        case 6: ctx.rotate(90 * Math.PI / 180); ctx.translate(0, -img.height); break;
+                        case 7: ctx.transform(0, -1, -1, 0, height, width); break;
+                        case 8: ctx.rotate(-90 * Math.PI / 180); ctx.translate(-img.width, 0); break;
+                    }
+
+                    ctx.drawImage(img, 0, 0);
+
+                    canvas.toBlob((blob) => {
+                        if (blob) {
+                            resolve(new File([blob], processedFile.name, { type: processedFile.type }));
+                        } else {
+                            resolve(processedFile);
+                        }
+                    }, processedFile.type === 'image/png' ? 'image/png' : 'image/jpeg');
+                };
+                img.src = URL.createObjectURL(processedFile);
+            });
+        }
+
+        return processedFile;
+    };
+
+
+
+
+
+
     const onDrop = useCallback(async (acceptedFiles: File[]) => {
         setIsProcessing(true);
         const allNewFiles: FileWithStatus[] = [];
 
         for (const file of acceptedFiles) {
+            // Check for PDF
             if (file.type === 'application/pdf') {
+                // ... PDF logic remains ...
                 try {
                     const pages = await extractPagesFromPdf(file);
                     allNewFiles.push(...pages);
@@ -226,17 +354,28 @@ export default function UnifiedImageTool() {
                     });
                 }
             } else {
-                allNewFiles.push({
-                    file,
-                    status: "pending",
-                    originalSize: formatBytes(file.size),
-                });
+                // Normalize Image (EXIF + HEIC)
+                try {
+                    const normalized = await normalizeFile(file);
+                    allNewFiles.push({
+                        file: normalized,
+                        status: "pending",
+                        originalSize: formatBytes(normalized.size),
+                    });
+                } catch (err) {
+                    console.error("Normalization failed:", err);
+                    allNewFiles.push({
+                        file,
+                        status: "pending", // Fallback to original
+                        originalSize: formatBytes(file.size),
+                    });
+                }
             }
         }
 
         setFiles((prev) => [...prev, ...allNewFiles]);
         setIsProcessing(false);
-    }, []);
+    }, [magickReady]);
 
     const { getRootProps, getInputProps, isDragActive } = useDropzone({
         onDrop,
@@ -251,6 +390,12 @@ export default function UnifiedImageTool() {
     const processFiles = async () => {
         setIsProcessing(true);
         setProgress(0);
+
+        if (mode === "split") {
+            await handleSplitAndDownload();
+            setIsProcessing(false);
+            return;
+        }
 
         const updatedFiles = [...files];
         let completedCount = 0;
@@ -273,9 +418,8 @@ export default function UnifiedImageTool() {
                 result = await handleUnifiedPipeline(item.file);
 
                 // Determine output extension based on mode or targetFormat
-                if (mode === "convert") outputExt = targetFormat;
-                else if (mode === "compress") outputExt = compressFormat;
-                else outputExt = "png";
+                // Determine output extension based on mode or targetFormat
+                outputExt = targetFormat;
 
                 if (result) {
                     item.result = result;
@@ -299,20 +443,97 @@ export default function UnifiedImageTool() {
         setIsProcessing(false);
 
         if (downloadMode === "zip") {
-            await downloadAllAsZip();
+            await downloadAllAsZip(updatedFiles);
+        } else if (downloadMode === "individual") {
+            updatedFiles.forEach(file => {
+                if (file.status === "done") {
+                    downloadIndividual(file);
+                }
+            });
         }
     };
 
-    const handleUnifiedPipeline = async (file: File): Promise<Blob> => {
+    const handleSplitAndDownload = async () => {
+        if (files.length === 0 || !files[0].file) return;
+        const file = files[0].file;
+
+        try {
+            // Create bitmap from the *processed* pipeline result if we want to support chaining? 
+            // For now, let's just split the original file or the pipeline result.
+            // Using pipeline result allows pre-adjustments before splitting.
+            const blob = await handleUnifiedPipeline(file);
+            const bitmap = await createImageBitmap(blob);
+
+            const zip = new JSZip();
+            const chunkWidth = bitmap.width / splitCols;
+            const chunkHeight = bitmap.height / splitRows;
+
+            // Get original extension
+            const originalExt = file.name.split('.').pop() || 'jpg';
+            const originalName = file.name.split('.')[0];
+            const timestamp = Date.now();
+
+            for (let r = 0; r < splitRows; r++) {
+                for (let c = 0; c < splitCols; c++) {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = chunkWidth;
+                    canvas.height = chunkHeight;
+                    const ctx = canvas.getContext('2d');
+
+                    if (ctx) {
+                        ctx.drawImage(
+                            bitmap,
+                            c * chunkWidth, r * chunkHeight, chunkWidth, chunkHeight,
+                            0, 0, chunkWidth, chunkHeight
+                        );
+
+                        const blob = await new Promise<Blob | null>(resolve =>
+                            canvas.toBlob(resolve, file.type || 'image/png')
+                        );
+
+                        if (blob) {
+                            const filename = `${originalName}_${r + 1}_${c + 1}.${originalExt}`;
+                            zip.file(filename, blob);
+                        }
+                    }
+                }
+            }
+
+            const content = await zip.generateAsync({ type: "blob" });
+            saveAs(content, `${originalName}_grid_${splitRows}x${splitCols}_${timestamp}.zip`);
+
+        } catch (error) {
+            console.error("Failed to generate split zip", error);
+            // Verify if we can show a toast or error status on the file.
+            const updatedFiles = [...files];
+            updatedFiles[0].status = "error";
+            updatedFiles[0].errorMessage = "Split failed";
+            setFiles(updatedFiles);
+        }
+    };
+
+    const handleUnifiedPipeline = async (file: File, isPreview: boolean = false): Promise<Blob> => {
         // Special case for compression which might use a different logic
         if (mode === "compress") {
             const res = await compressToSize(file, targetSizeKB, MagickFormat.Jpg);
             return res.blob;
         }
 
+        // Pre-conversion (HEIC/TIFF) is now handled in onDrop/normalizeFile
+        // But we keep this check just in case or for legacy/re-processing
+        const processFile = file;
+
+        // EXIF rotation is also handled in normalizeFile, so we can assume orientation 1 for new uploads. 
+        // However, if we re-process an old file, we might need it. 
+        // Let's rely on the fact that if it's already normalized, getOrientation will return 1.
+
+        // Skip fetching orientation again if we are confident, but it's cheap to check.
+        // Actually, if we normalized it, the blob doesn't have EXIF anymore (canvas drops it).
+        // So this is safe.
+
         return new Promise((resolve, reject) => {
             const img = new Image();
-            const url = URL.createObjectURL(file);
+            const url = URL.createObjectURL(processFile);
 
             img.onload = () => {
                 const canvas = document.createElement('canvas');
@@ -327,24 +548,38 @@ export default function UnifiedImageTool() {
                 let width = img.width;
                 let height = img.height;
 
+                // EXIF Orientation Check -> Now handled in normalizeFile
+
                 // Handle Resize
-                if (resizeMode === "percentage") {
-                    width = img.width * (resizePercentage / 100);
-                    height = img.height * (resizePercentage / 100);
-                } else if (resizeWidth > 0 && resizeHeight > 0) {
-                    width = resizeWidth;
-                    height = resizeHeight;
+                if (!isPreview) {
+                    if (resizeMode === "percentage") {
+                        width = img.width * (resizePercentage / 100);
+                        height = img.height * (resizePercentage / 100);
+                    } else if (resizeWidth > 0 && resizeHeight > 0) {
+                        width = resizeWidth;
+                        height = resizeHeight;
+                    }
                 }
 
-                // Handle Rotation dimensions
-                if (rotateAngle === 90 || rotateAngle === 270) {
-                    [width, height] = [height, width];
-                }
+                // Handle Rotation dimensions (User Rotation Only)
+                // If EXIF says 90/270 (5-8), we swap dimensions. 
+                // Then if user rotates 90/270, we swap again.
+                // BUT, to keep it sane, let's apply EXIF first, drawing to a temp canvas if needed, OR just transform.
 
-                canvas.width = width;
-                canvas.height = height;
+                // Easier approach: Handle EXIF in step 4 (Transform).
+                // Just need to know if we need to swap dimensions for the final canvas.
 
-                // Handle Crop logic (if active)
+                // We rely on the getOrientation result passed in (or we fetch it here). 
+                // Since we can't easily async inside onload, let's assume we pre-fetched or fetch now?
+                // Actually, handleUnifiedPipeline is async. We can fetch orientation before creating the Image object!
+
+                // Let's assume we pass orientation in or fetches it. 
+                // To avoid race conditions, let's fetch it outside and pass it down? 
+                // Or just do it here since we are inside the Promise executor but onload is sync.
+                // Wait, we can't await inside onload.
+
+                // FIX: Move getOrientation call to BEFORE `new Promise`.
+
                 let sX = 0, sY = 0, sWidth = img.width, sHeight = img.height;
                 if (completedCrop && (mode === "crop")) {
                     const previewImg = document.getElementById('crop-target') as HTMLImageElement;
@@ -360,6 +595,14 @@ export default function UnifiedImageTool() {
                         canvas.width = sWidth;
                         canvas.height = sHeight;
                     }
+                } else {
+                    // Calculate bounding box for rotation
+                    const rad = (rotateAngle * Math.PI) / 180;
+                    const absCos = Math.abs(Math.cos(rad));
+                    const absSin = Math.abs(Math.sin(rad));
+
+                    canvas.width = width * absCos + height * absSin;
+                    canvas.height = width * absSin + height * absCos;
                 }
 
                 // 2. Clear and Save Initial State
@@ -390,17 +633,27 @@ export default function UnifiedImageTool() {
                 // The draw size should be the resized dimensions BEFORE rotation
                 let drawWidth = img.width;
                 let drawHeight = img.height;
-                if (resizeMode === "percentage") {
-                    drawWidth *= (resizePercentage / 100);
-                    drawHeight *= (resizePercentage / 100);
-                } else if (resizeWidth > 0 && resizeHeight > 0) {
-                    drawWidth = resizeWidth;
-                    drawHeight = resizeHeight;
+                if (!isPreview) {
+                    if (resizeMode === "percentage") {
+                        drawWidth *= (resizePercentage / 100);
+                        drawHeight *= (resizePercentage / 100);
+                    } else if (resizeWidth > 0 && resizeHeight > 0) {
+                        drawWidth = resizeWidth;
+                        drawHeight = resizeHeight;
+                    }
                 }
 
                 if (mode === "crop" && completedCrop) {
+                    // For crop, we need to apply EXIF to the source image drawing too? 
+                    // This gets complicated. 
+                    // Simplest fix: Pre-process the image if it has EXIF data so `img` is already correct.
+                    // But that converts to PNG/Blob, slow.
+
+                    // Alternative: Apply EXIF transform here.
                     ctx.drawImage(img, sX, sY, sWidth, sHeight, 0, 0, sWidth, sHeight);
                 } else {
+                    // 4b. Apply EXIF Rotation if needed -> Handled in normalizeFile
+
                     ctx.drawImage(img, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
                 }
 
@@ -410,7 +663,8 @@ export default function UnifiedImageTool() {
                 applyWatermark(canvas, ctx);
 
                 // 7. Export to Blob
-                const outputFormat = mode === "convert" ? targetFormat : "png";
+                // 7. Export to Blob
+                const outputFormat = targetFormat;
                 const needsMagick = ["tiff", "bmp", "pdf", "gif", "avif"].includes(outputFormat);
 
                 if (needsMagick) {
@@ -445,13 +699,14 @@ export default function UnifiedImageTool() {
                         URL.revokeObjectURL(url);
                         if (blob) resolve(blob);
                         else reject(new Error("Failed to create blob"));
-                    }, `image/${outputFormat}`);
+                    }, `image/${outputFormat}`, 0.85); // 0.85 quality for JPG/WebP
                 }
             };
 
-            img.onerror = () => {
+            img.onerror = (e) => {
+                console.error("Image load error details:", e);
                 URL.revokeObjectURL(url);
-                reject(new Error("Failed to load image"));
+                reject(new Error(`Failed to load image: ${(e as any).type || 'Unknown error'}`));
             };
 
             img.src = url;
@@ -529,709 +784,174 @@ export default function UnifiedImageTool() {
         ctx.globalAlpha = 1.0; // Reset
     };
 
-    const handleAdvancedProcessing = async (file: File): Promise<Blob> => {
-        return new Promise((resolve, reject) => {
-            const img = new Image();
-            const url = URL.createObjectURL(file);
 
-            img.onload = () => {
-                const canvas = document.createElement('canvas');
-                const ctx = canvas.getContext('2d');
-
-                if (!ctx) {
-                    reject(new Error("Canvas not supported"));
-                    return;
-                }
-
-                canvas.width = img.width;
-                canvas.height = img.height;
-
-                // Apply adjustments and filters
-                applyCanvasFilters(ctx);
-
-                // Draw image with filters
-                ctx.drawImage(img, 0, 0);
-
-                // Apply watermark (unaffected by filters usually)
-                applyWatermark(canvas, ctx);
-
-                canvas.toBlob((blob) => {
-                    URL.revokeObjectURL(url);
-                    if (blob) resolve(blob);
-                    else reject(new Error("Failed to create blob"));
-                }, 'image/png');
-            };
-
-            img.onerror = () => {
-                URL.revokeObjectURL(url);
-                reject(new Error("Failed to load image"));
-            };
-
-            img.src = url;
-        });
-    };
 
     const downloadIndividual = (item: FileWithStatus) => {
         if (item.result && item.outputName) {
-            saveAs(item.result, item.outputName);
+            // Ensure extension matches
+            let finalName = item.outputName;
+            const ext = finalName.split('.').pop()?.toLowerCase();
+            const expectedExt = targetFormat === 'jpeg' ? 'jpg' : targetFormat;
+
+            // Normalize current extension for comparison
+            const currentExt = ext === 'jpeg' ? 'jpg' : ext;
+
+            if (currentExt !== expectedExt) {
+                finalName = finalName.replace(/\.[^/.]+$/, "") + "." + expectedExt;
+            }
+
+            saveAs(item.result, finalName);
         }
     };
 
-    const downloadAllIndividually = () => {
-        files.forEach((file) => {
-            if (file.status === "done") {
-                downloadIndividual(file);
+
+
+    const downloadAllAsZip = async (currentFiles: FileWithStatus[]) => {
+        try {
+            const zip = new JSZip();
+            let count = 0;
+
+            console.log("Starting ZIP generation for", currentFiles.length, "files");
+
+            currentFiles.forEach((file) => {
+                if (file.status === "done" && file.result && file.outputName) {
+                    // Sanitize filename & Ensure extension
+                    let cleanName = file.outputName.replace(/[^a-zA-Z0-9._-]/g, "_");
+
+                    const ext = cleanName.split('.').pop()?.toLowerCase();
+                    const expectedExt = targetFormat === 'jpeg' ? 'jpg' : targetFormat;
+                    const currentExt = ext === 'jpeg' ? 'jpg' : ext;
+
+                    if (currentExt !== expectedExt) {
+                        cleanName = cleanName.replace(/\.[^/.]+$/, "") + "." + expectedExt;
+                    }
+
+                    zip.file(cleanName, file.result);
+                    count++;
+                }
+            });
+
+            if (count === 0) {
+                console.warn("No completed files to zip");
+                return;
             }
-        });
-    };
 
-    const downloadAllAsZip = async () => {
-        const zip = new JSZip();
-        let count = 0;
-
-        files.forEach((file) => {
-            if (file.status === "done" && file.result && file.outputName) {
-                zip.file(file.outputName, file.result);
-                count++;
-            }
-        });
-
-        if (count === 0) return;
-
-        const content = await zip.generateAsync({ type: "blob" });
-        saveAs(content, `photocon_${mode}_${Date.now()}.zip`);
+            console.log("Generating ZIP with", count, "files");
+            const content = await zip.generateAsync({ type: "blob" });
+            saveAs(content, `photocon_${mode}_${Date.now()}.zip`);
+        } catch (error) {
+            console.error("ZIP Generation failed:", error);
+            // Optionally show user alert
+        }
     };
 
     const removeFile = (index: number) => {
         setFiles(prev => prev.filter((_, i) => i !== index));
+        if (index < selectedFileIndex) {
+            setSelectedFileIndex(prev => Math.max(0, prev - 1));
+        } else if (index === selectedFileIndex) {
+            // If removing selected, stay at index unless it was the last one
+            setSelectedFileIndex(prev => (prev === files.length - 1 && prev > 0) ? prev - 1 : prev);
+        }
     };
 
-    const completedCount = files.filter(f => f.status === "done").length;
-    const hasCompleted = completedCount > 0;
+
     const isReady = mode === "compress" ? compressorReady : magickReady;
+
+    const onImageLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
+        const { width, height } = e.currentTarget;
+        if (aspect) {
+            setCrop(centerCrop(
+                makeAspectCrop(
+                    { unit: '%', width: 90 },
+                    aspect,
+                    width,
+                    height
+                ),
+                width,
+                height
+            ));
+        } else if (mode === "split") {
+            // Maybe default split overlay doesn't need crop, but good to know load happened
+        } else {
+            setCrop({
+                unit: '%',
+                width: 90,
+                height: 90,
+                x: 5,
+                y: 5
+            });
+        }
+    };
 
     return (
         <div className="h-full flex flex-col md:flex-row bg-slate-50 overflow-hidden">
             <Tabs value={mode} onValueChange={(v) => setMode(v as ToolMode)} className="flex-1 flex flex-col md:flex-row overflow-hidden" orientation="vertical">
                 {/* Sidebar Navigation */}
-                <TabsList className="flex flex-row md:flex-col h-16 md:h-full w-full md:w-[80px] bg-slate-900 p-2 gap-2 md:gap-4 shrink-0 rounded-none border-b md:border-b-0 md:border-r border-slate-800 overflow-x-auto md:overflow-y-auto no-scrollbar items-center md:py-6">
-                    {[
-                        { value: "convert", icon: FileType, label: "Convert" },
-                        { value: "compress", icon: RefreshCw, label: "Compress" },
-                        { value: "resize", icon: Maximize2, label: "Resize" },
-                        { value: "crop", icon: Scissors, label: "Crop" },
-                        { value: "rotate", icon: RotateCw, label: "Rotate" },
-                        { value: "flip", icon: FlipHorizontal, label: "Flip" },
-                        { value: "adjust", icon: Sliders, label: "Adjust" },
-                        { value: "filter", icon: Palette, label: "Filter" },
-                        { value: "watermark", icon: Type, label: "Watermark" },
-                    ].map((t) => (
-                        <TabsTrigger
-                            key={t.value}
-                            value={t.value}
-                            className="group flex flex-col items-center justify-center gap-1.5 w-12 md:w-16 aspect-square p-0 data-[state=active]:bg-primary/20 data-[state=active]:text-primary text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition-all rounded-xl shrink-0 relative"
-                            title={t.label}
-                        >
-                            <t.icon className="w-5 h-5 md:w-6 md:h-6 transition-transform group-hover:scale-110" />
-                            <span className="text-[9px] font-medium opacity-70 group-hover:opacity-100">{t.label}</span>
-                            {/* Active Indicator Line */}
-                            <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-8 bg-primary rounded-r-full opacity-0 data-[state=active]:opacity-100 transition-opacity hidden md:block" />
-                        </TabsTrigger>
-                    ))}
-                </TabsList>
+                <Sidebar currentMode={mode} />
 
                 {/* Main Viewport (Canvas Area) */}
-                <div className="flex-1 bg-slate-100/50 flex flex-col min-w-0 relative overflow-hidden">
-                    {/* Toolbar / Header */}
-                    <div className="h-14 px-6 border-b bg-white flex items-center justify-between shrink-0 shadow-sm z-10">
-                        <div className="flex items-center gap-3">
-                            <div className="p-1.5 bg-primary/10 rounded-lg text-primary">
-                                <ImageIcon className="w-4 h-4" />
-                            </div>
-                            <div>
-                                <h2 className="text-sm font-bold text-slate-800 uppercase tracking-wide">
-                                    {mode} Image
-                                </h2>
-                            </div>
-                        </div>
-
-                        <div className="flex items-center gap-4">
-                            {isPreviewProcessing && (
-                                <div className="flex items-center gap-2 text-[10px] text-primary font-bold animate-pulse px-3 py-1 bg-primary/5 rounded-full">
-                                    <Loader2 className="w-3 h-3 animate-spin" />
-                                    PROCESSING...
-                                </div>
-                            )}
-                        </div>
-                    </div>
-
-                    {/* Canvas Scroll Area */}
-                    <div className="flex-1 overflow-auto p-4 md:p-8 flex items-center justify-center relative bg-[url('https://www.transparenttextures.com/patterns/checkerboard.png')]">
-                        <AnimatePresence mode="wait">
-                            {previewUrl ? (
-                                <motion.div
-                                    key={previewUrl}
-                                    initial={{ opacity: 0, scale: 0.95 }}
-                                    animate={{ opacity: 1, scale: 1 }}
-                                    exit={{ opacity: 0, scale: 1.05 }}
-                                    transition={{ duration: 0.2 }}
-                                    className="relative max-w-full max-h-full flex items-center justify-center shadow-2xl rounded-lg overflow-hidden ring-1 ring-slate-900/5"
-                                >
-                                    <img
-                                        src={previewUrl}
-                                        alt="Preview"
-                                        className="max-w-full max-h-[calc(100vh-200px)] object-contain bg-white"
-                                    />
-                                </motion.div>
-                            ) : (
-                                <motion.div
-                                    initial={{ opacity: 0, y: 10 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    className="text-center space-y-6 max-w-md"
-                                >
-                                    <div className="w-24 h-24 bg-white rounded-3xl flex items-center justify-center mx-auto shadow-sm border border-slate-100">
-                                        <Upload className="w-10 h-10 text-slate-300" />
-                                    </div>
-                                    <div>
-                                        <h3 className="text-xl font-bold text-slate-800">No Image Selected</h3>
-                                        <p className="text-slate-500 text-sm mt-2">
-                                            Upload an image from the right panel to start editing.
-                                        </p>
-                                    </div>
-                                </motion.div>
-                            )}
-                        </AnimatePresence>
-                    </div>
-                </div>
-
+                <CanvasArea
+                    previewUrl={previewUrl}
+                    mode={mode}
+                    isPreviewProcessing={isPreviewProcessing}
+                    // Crop Props
+                    crop={crop}
+                    setCrop={setCrop}
+                    setCompletedCrop={setCompletedCrop}
+                    aspect={aspect}
+                    onImageLoad={onImageLoad}
+                    splitRows={splitRows}
+                    splitCols={splitCols}
+                    // Dropzone
+                    getRootProps={getRootProps}
+                    getInputProps={getInputProps}
+                    isDragActive={isDragActive}
+                />
                 {/* Right Sidebar (Settings & Queue) */}
-                <div className="w-full md:w-[360px] lg:w-[400px] h-[40vh] md:h-full flex flex-col min-w-0 bg-white shadow-xl z-20 overflow-hidden border-t md:border-t-0 md:border-l border-slate-200">
-                    <div className="p-5 border-b flex items-center justify-between shrink-0 bg-white">
-                        <h3 className="font-bold text-slate-800">Configuration</h3>
-                        {isReady ? (
-                            <span className="flex items-center gap-1.5 text-[10px] font-bold text-green-600 bg-green-50 px-2.5 py-1 rounded-full border border-green-100">
-                                <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
-                                ENGINE READY
-                            </span>
-                        ) : (
-                            <span className="flex items-center gap-1.5 text-[10px] font-bold text-amber-600 bg-amber-50 px-2.5 py-1 rounded-full border border-amber-100">
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                                LOADING WASM...
-                            </span>
-                        )}
-                    </div>
-
-                    <div className="flex-1 overflow-y-auto p-6 space-y-8 custom-scrollbar">
-                        <TabsContent value="convert" className="mt-0 focus-visible:outline-none">
-                            <div className="grid grid-cols-1 gap-5">
-                                <div className="space-y-2">
-                                    <Label className="font-semibold">Output Format</Label>
-                                    <Select value={targetFormat} onValueChange={setTargetFormat} disabled={isProcessing}>
-                                        <SelectTrigger className="h-11">
-                                            <SelectValue />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            <SelectItem value="jpg">JPG</SelectItem>
-                                            <SelectItem value="png">PNG</SelectItem>
-                                            <SelectItem value="webp">WebP</SelectItem>
-                                            <SelectItem value="avif">AVIF</SelectItem>
-                                            <SelectItem value="tiff">TIFF</SelectItem>
-                                            <SelectItem value="bmp">BMP</SelectItem>
-                                            <SelectItem value="gif">GIF</SelectItem>
-                                        </SelectContent>
-                                    </Select>
-                                </div>
-                                <div className="space-y-2">
-                                    <Label className="font-semibold">Download Mode</Label>
-                                    <Select value={downloadMode} onValueChange={(v: any) => setDownloadMode(v)} disabled={isProcessing}>
-                                        <SelectTrigger className="h-11">
-                                            <SelectValue />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            <SelectItem value="individual">Individual</SelectItem>
-                                            <SelectItem value="zip">ZIP</SelectItem>
-                                        </SelectContent>
-                                    </Select>
-                                </div>
-                                <div className="space-y-2 sm:col-span-2 lg:col-span-2">
-                                    <Label className="opacity-0">Action</Label>
-                                    <Button className="w-full h-11 font-bold shadow-sm" onClick={processFiles} disabled={!isReady || isProcessing || files.length === 0}>
-                                        {isProcessing ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
-                                        Convert All Files
-                                    </Button>
-                                </div>
-                            </div>
-                        </TabsContent>
-
-                        <TabsContent value="compress" className="mt-0 focus-visible:outline-none">
-                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-6 items-end">
-                                <div className="space-y-2">
-                                    <Label className="font-semibold">Target Size (KB)</Label>
-                                    <Input className="h-11" type="number" value={targetSizeKB} onChange={(e) => setTargetSizeKB(parseInt(e.target.value) || 0)} min={1} />
-                                </div>
-                                <div className="space-y-2">
-                                    <Label className="font-semibold">Format</Label>
-                                    <Select value={compressFormat} onValueChange={setCompressFormat} disabled={isProcessing}>
-                                        <SelectTrigger className="h-11">
-                                            <SelectValue />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            <SelectItem value="jpg">JPG</SelectItem>
-                                            <SelectItem value="png">PNG</SelectItem>
-                                            <SelectItem value="webp">WebP</SelectItem>
-                                            <SelectItem value="avif">AVIF</SelectItem>
-                                        </SelectContent>
-                                    </Select>
-                                </div>
-                                <div className="space-y-2">
-                                    <Label className="font-semibold">Download Mode</Label>
-                                    <Select value={downloadMode} onValueChange={(v: any) => setDownloadMode(v)} disabled={isProcessing}>
-                                        <SelectTrigger className="h-11">
-                                            <SelectValue />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            <SelectItem value="individual">Individual</SelectItem>
-                                            <SelectItem value="zip">ZIP</SelectItem>
-                                        </SelectContent>
-                                    </Select>
-                                </div>
-                                <div className="space-y-2 sm:col-span-2 lg:col-span-2">
-                                    <Button className="w-full h-11 font-bold shadow-sm" onClick={processFiles} disabled={!isReady || isProcessing || files.length === 0}>
-                                        {isProcessing ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
-                                        Compress All Files
-                                    </Button>
-                                </div>
-                            </div>
-                        </TabsContent>
-
-                        <TabsContent value="resize" className="mt-0 focus-visible:outline-none">
-                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-4 items-end">
-                                <div className="space-y-2">
-                                    <Label className="font-semibold">Mode</Label>
-                                    <Select value={resizeMode} onValueChange={(v: any) => setResizeMode(v)} disabled={isProcessing}>
-                                        <SelectTrigger className="h-11">
-                                            <SelectValue />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            <SelectItem value="percentage">Percentage</SelectItem>
-                                            <SelectItem value="dimensions">Dimensions</SelectItem>
-                                        </SelectContent>
-                                    </Select>
-                                </div>
-                                {resizeMode === "percentage" ? (
-                                    <div className="space-y-2">
-                                        <Label className="font-semibold">Scale (%)</Label>
-                                        <Input className="h-11" type="number" value={resizePercentage} onChange={(e) => setResizePercentage(parseInt(e.target.value) || 0)} min={1} max={500} />
-                                    </div>
-                                ) : (
-                                    <>
-                                        <div className="space-y-2">
-                                            <Label className="font-semibold">Width (px)</Label>
-                                            <Input className="h-11" type="number" value={resizeWidth} onChange={(e) => setResizeWidth(parseInt(e.target.value) || 0)} min={1} />
-                                        </div>
-                                        <div className="space-y-2">
-                                            <Label className="font-semibold">Height (px)</Label>
-                                            <Input className="h-11" type="number" value={resizeHeight} onChange={(e) => setResizeHeight(parseInt(e.target.value) || 0)} min={1} />
-                                        </div>
-                                    </>
-                                )}
-                                <div className="space-y-2">
-                                    <Label className="font-semibold">Download</Label>
-                                    <Select value={downloadMode} onValueChange={(v: any) => setDownloadMode(v)} disabled={isProcessing}>
-                                        <SelectTrigger className="h-11">
-                                            <SelectValue />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            <SelectItem value="individual">Individual</SelectItem>
-                                            <SelectItem value="zip">ZIP</SelectItem>
-                                        </SelectContent>
-                                    </Select>
-                                </div>
-                                <div className="space-y-2 sm:col-span-2 lg:col-span-2">
-                                    <Label className="opacity-0">Action</Label>
-                                    <Button className="w-full h-11 font-bold shadow-sm" onClick={processFiles} disabled={isProcessing || files.length === 0}>
-                                        {isProcessing ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
-                                        Apply Resize & Process
-                                    </Button>
-                                </div>
-                            </div>
-                        </TabsContent>
-
-                        <TabsContent value="rotate" className="mt-0 focus-visible:outline-none">
-                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-6 items-end">
-                                <div className="space-y-2">
-                                    <Label className="font-semibold">Angle (degrees)</Label>
-                                    <Select value={rotateAngle.toString()} onValueChange={(v) => setRotateAngle(parseInt(v))} disabled={isProcessing}>
-                                        <SelectTrigger className="h-11">
-                                            <SelectValue />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            <SelectItem value="90">90°</SelectItem>
-                                            <SelectItem value="180">180°</SelectItem>
-                                            <SelectItem value="270">270°</SelectItem>
-                                        </SelectContent>
-                                    </Select>
-                                </div>
-                                <div className="space-y-2">
-                                    <Label className="font-semibold">Download Mode</Label>
-                                    <Select value={downloadMode} onValueChange={(v: any) => setDownloadMode(v)} disabled={isProcessing}>
-                                        <SelectTrigger className="h-11">
-                                            <SelectValue />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            <SelectItem value="individual">Individual</SelectItem>
-                                            <SelectItem value="zip">ZIP</SelectItem>
-                                        </SelectContent>
-                                    </Select>
-                                </div>
-                                <div className="space-y-2 lg:col-span-2">
-                                    <Button className="w-full h-11 font-semibold" onClick={processFiles} disabled={isProcessing || files.length === 0}>
-                                        {isProcessing ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
-                                        Rotate
-                                    </Button>
-                                </div>
-                            </div>
-                        </TabsContent>
-
-                        <TabsContent value="flip" className="mt-0 focus-visible:outline-none">
-                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-6 items-end">
-                                <div className="space-y-2">
-                                    <Label className="font-semibold">Direction</Label>
-                                    <Select value={flipDirection} onValueChange={(v: any) => setFlipDirection(v)} disabled={isProcessing}>
-                                        <SelectTrigger className="h-11">
-                                            <SelectValue />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            <SelectItem value="horizontal">Horizontal</SelectItem>
-                                            <SelectItem value="vertical">Vertical</SelectItem>
-                                        </SelectContent>
-                                    </Select>
-                                </div>
-                                <div className="space-y-2">
-                                    <Label className="font-semibold">Download Mode</Label>
-                                    <Select value={downloadMode} onValueChange={(v: any) => setDownloadMode(v)} disabled={isProcessing}>
-                                        <SelectTrigger className="h-11">
-                                            <SelectValue />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            <SelectItem value="individual">Individual</SelectItem>
-                                            <SelectItem value="zip">ZIP</SelectItem>
-                                        </SelectContent>
-                                    </Select>
-                                </div>
-                                <div className="space-y-2 lg:col-span-2">
-                                    <Button className="w-full h-11 font-semibold" onClick={processFiles} disabled={isProcessing || files.length === 0}>
-                                        {isProcessing ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
-                                        Flip
-                                    </Button>
-                                </div>
-                            </div>
-                        </TabsContent>
-
-                        <TabsContent value="crop" className="mt-0 focus-visible:outline-none">
-                            <div className="space-y-6">
-                                {files.length > 0 && files[0].file && (
-                                    <div className="flex justify-center bg-slate-50 rounded-xl p-4 border border-dashed border-slate-200 min-h-[200px] items-center overflow-hidden">
-                                        <ReactCrop
-                                            crop={crop}
-                                            onChange={c => setCrop(c)}
-                                            onComplete={c => setCompletedCrop(c)}
-                                            aspect={aspect}
-                                            className="max-w-full"
-                                        >
-                                            <img
-                                                id="crop-target"
-                                                src={URL.createObjectURL(files[0].file)}
-                                                alt="Crop target"
-                                                className="max-h-[300px] w-auto object-contain shadow-lg rounded-sm"
-                                                onLoad={(e) => {
-                                                    const { width, height } = e.currentTarget;
-                                                    setCrop(centerCrop(
-                                                        makeAspectCrop(
-                                                            { unit: '%', width: 90 },
-                                                            aspect || 1,
-                                                            width,
-                                                            height
-                                                        ),
-                                                        width,
-                                                        height
-                                                    ));
-                                                }}
-                                            />
-                                        </ReactCrop>
-                                    </div>
-                                )}
-                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-6 items-end">
-                                    <div className="space-y-2">
-                                        <Label className="font-semibold text-slate-700">Aspect Ratio</Label>
-                                        <Select value={cropAspectRatio} onValueChange={setCropAspectRatio} disabled={isProcessing}>
-                                            <SelectTrigger className="h-11 bg-white">
-                                                <SelectValue />
-                                            </SelectTrigger>
-                                            <SelectContent>
-                                                <SelectItem value="free">Free Form</SelectItem>
-                                                <SelectItem value="1:1">1:1 Square</SelectItem>
-                                                <SelectItem value="16:9">16:9 Widescreen</SelectItem>
-                                                <SelectItem value="4:3">4:3 Standard</SelectItem>
-                                                <SelectItem value="2:3">2:3 Portrait</SelectItem>
-                                            </SelectContent>
-                                        </Select>
-                                    </div>
-                                    <div className="space-y-2">
-                                        <Label className="font-semibold text-slate-700">Download Mode</Label>
-                                        <Select value={downloadMode} onValueChange={(v: any) => setDownloadMode(v)} disabled={isProcessing}>
-                                            <SelectTrigger className="h-11 bg-white">
-                                                <SelectValue />
-                                            </SelectTrigger>
-                                            <SelectContent>
-                                                <SelectItem value="individual">Download Individually</SelectItem>
-                                                <SelectItem value="zip">Download All (ZIP)</SelectItem>
-                                            </SelectContent>
-                                        </Select>
-                                    </div>
-                                    <div className="lg:col-span-2">
-                                        <Button className="w-full h-11 font-semibold shadow-md" onClick={processFiles} disabled={isProcessing || files.length === 0}>
-                                            {isProcessing ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
-                                            Apply Crop & Process
-                                        </Button>
-                                    </div>
-                                </div>
-                                <p className="text-[11px] text-muted-foreground text-center bg-slate-50 py-2 rounded-md">
-                                    Drag handles to crop. This will be applied to all images in your queue.
-                                </p>
-                            </div>
-                        </TabsContent>
-
-                        <TabsContent value="adjust" className="mt-0 focus-visible:outline-none">
-                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-8 items-end">
-                                <div className="space-y-4">
-                                    <Label className="font-semibold text-slate-700">Brightness ({brightness}%)</Label>
-                                    <Slider value={[brightness]} min={0} max={200} step={1} onValueChange={([v]) => setBrightness(v)} className="py-2" />
-                                </div>
-                                <div className="space-y-4">
-                                    <Label className="font-semibold text-slate-700">Contrast ({contrast}%)</Label>
-                                    <Slider value={[contrast]} min={0} max={200} step={1} onValueChange={([v]) => setContrast(v)} className="py-2" />
-                                </div>
-                                <div className="space-y-4">
-                                    <Label className="font-semibold text-slate-700">Saturation ({saturation}%)</Label>
-                                    <Slider value={[saturation]} min={0} max={200} step={1} onValueChange={([v]) => setSaturation(v)} className="py-2" />
-                                </div>
-                                <div className="sm:col-span-2 lg:col-span-2">
-                                    <Button className="w-full h-11 font-bold shadow-sm" onClick={processFiles} disabled={isProcessing || files.length === 0}>
-                                        {isProcessing ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
-                                        Apply Adjustments
-                                    </Button>
-                                </div>
-                            </div>
-                        </TabsContent>
-
-                        <TabsContent value="filter" className="mt-0 focus-visible:outline-none">
-                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-6 items-end">
-                                <div className="space-y-2 sm:col-span-1 lg:col-span-2">
-                                    <Label className="font-semibold text-slate-700">Preset Filter</Label>
-                                    <Select value={selectedFilter} onValueChange={setSelectedFilter} disabled={isProcessing}>
-                                        <SelectTrigger className="h-11 bg-white">
-                                            <SelectValue />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            <SelectItem value="none">None (Original Image)</SelectItem>
-                                            <SelectItem value="grayscale">Grayscale (B&W)</SelectItem>
-                                            <SelectItem value="sepia">Sepia (Antique)</SelectItem>
-                                            <SelectItem value="invert">Invert (Negative)</SelectItem>
-                                            <SelectItem value="warm">Warm Glow</SelectItem>
-                                            <SelectItem value="cool">Cool Blue</SelectItem>
-                                            <SelectItem value="dramatic">Dramatic B&W</SelectItem>
-                                            <SelectItem value="vintage">Vintage Film</SelectItem>
-                                        </SelectContent>
-                                    </Select>
-                                </div>
-                                <div className="space-y-2">
-                                    <Label className="font-semibold text-slate-700">Download Mode</Label>
-                                    <Select value={downloadMode} onValueChange={(v: any) => setDownloadMode(v)} disabled={isProcessing}>
-                                        <SelectTrigger className="h-11 bg-white">
-                                            <SelectValue />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            <SelectItem value="individual">Download Individually</SelectItem>
-                                            <SelectItem value="zip">Download All (ZIP)</SelectItem>
-                                        </SelectContent>
-                                    </Select>
-                                </div>
-                                <div className="sm:col-span-2 lg:col-span-2">
-                                    <Button className="w-full h-11 font-bold shadow-sm" onClick={processFiles} disabled={isProcessing || files.length === 0}>
-                                        {isProcessing ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
-                                        Apply Filter to All
-                                    </Button>
-                                </div>
-                            </div>
-                        </TabsContent>
-
-                        <TabsContent value="watermark" className="mt-0 focus-visible:outline-none">
-                            <div className="grid grid-cols-1 gap-6">
-                                {/* Type Toggle */}
-                                <div className="grid grid-cols-2 gap-1 p-1 bg-slate-100 rounded-lg">
-                                    <button
-                                        onClick={() => setWatermarkType("text")}
-                                        className={`py-2 text-xs font-bold rounded-md transition-all ${watermarkType === "text" ? "bg-white text-primary shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
-                                    >
-                                        Text Watermark
-                                    </button>
-                                    <button
-                                        onClick={() => setWatermarkType("image")}
-                                        className={`py-2 text-xs font-bold rounded-md transition-all ${watermarkType === "image" ? "bg-white text-primary shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
-                                    >
-                                        Image Logo
-                                    </button>
-                                </div>
-
-                                {watermarkType === "text" ? (
-                                    <div className="space-y-2">
-                                        <Label className="font-semibold text-slate-700">Text Content</Label>
-                                        <Input
-                                            className="h-11 bg-white"
-                                            placeholder="Watermark text..."
-                                            value={watermarkText}
-                                            onChange={(e) => setWatermarkText(e.target.value)}
-                                        />
-                                    </div>
-                                ) : (
-                                    <div className="space-y-2">
-                                        <Label className="font-semibold text-slate-700">Upload Logo</Label>
-                                        <div className="relative">
-                                            <Input
-                                                type="file"
-                                                accept="image/*"
-                                                className="h-11 bg-white pt-2 file:mr-4 file:py-1 file:px-2 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-primary/10 file:text-primary hover:file:bg-primary/20"
-                                                onChange={handleWatermarkImageUpload}
-                                            />
-                                        </div>
-                                        {watermarkImage && (
-                                            <p className="text-[10px] text-green-600 font-bold flex items-center gap-1">
-                                                <CheckCircle2 className="w-3 h-3" /> Image Loaded
-                                            </p>
-                                        )}
-                                    </div>
-                                )}
-
-                                <div className="space-y-2">
-                                    <Label className="font-semibold text-slate-700">Placement</Label>
-                                    <Select value={watermarkPosition} onValueChange={setWatermarkPosition}>
-                                        <SelectTrigger className="h-11 bg-white">
-                                            <SelectValue />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            <SelectItem value="top-left">Top Left</SelectItem>
-                                            <SelectItem value="top-right">Top Right</SelectItem>
-                                            <SelectItem value="bottom-left">Bottom Left</SelectItem>
-                                            <SelectItem value="bottom-right">Bottom Right</SelectItem>
-                                            <SelectItem value="center">Center</SelectItem>
-                                        </SelectContent>
-                                    </Select>
-                                </div>
-
-                                <div className="space-y-4 px-2">
-                                    <div className="flex justify-between">
-                                        <Label className="font-semibold text-slate-700 text-xs">
-                                            {watermarkType === "text" ? "Font Size" : "Image Scale"}
-                                        </Label>
-                                        <span className="text-xs font-mono text-slate-500">
-                                            {watermarkSize}{watermarkType === "text" ? "px" : "%"}
-                                        </span>
-                                    </div>
-                                    <Slider value={[watermarkSize]} min={5} max={100} step={1} onValueChange={([v]) => setWatermarkSize(v)} />
-                                </div>
-
-                                <div className="space-y-4 px-2">
-                                    <div className="flex justify-between">
-                                        <Label className="font-semibold text-slate-700 text-xs">Opacity</Label>
-                                        <span className="text-xs font-mono text-slate-500">{watermarkOpacity}%</span>
-                                    </div>
-                                    <Slider value={[watermarkOpacity]} min={0} max={100} step={1} onValueChange={([v]) => setWatermarkOpacity(v)} />
-                                </div>
-
-                                <div className="sm:col-span-2 lg:col-span-2 pt-2">
-                                    <Button className="w-full h-11 font-bold shadow-sm" onClick={processFiles} disabled={isProcessing || files.length === 0}>
-                                        {isProcessing ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
-                                        Process Key
-                                    </Button>
-                                    <p className="text-[10px] text-center text-slate-400 mt-2">
-                                        Applies watermark and selected output format
-                                    </p>
-                                </div>
-                            </div>
-                        </TabsContent>
-
-                        {/* Upload Zone (Integrated into Settings) */}
-                        <div className="pt-4 border-t border-slate-100">
-                            <div
-                                {...getRootProps()}
-                                className={`
-                                    border-2 border-dashed rounded-xl p-6 sm:p-12 text-center cursor-pointer transition-all
-                                    ${isDragActive ? "border-primary bg-primary/5 scale-[1.02]" : "border-border hover:border-primary/50"}
-                                `}
-                            >
-                                <input {...getInputProps()} />
-                                <div className="flex flex-col items-center gap-3 sm:gap-4">
-                                    <div className="p-3 sm:p-4 bg-muted rounded-full">
-                                        <Upload className="w-8 h-8 sm:w-10 sm:h-10 text-muted-foreground" />
-                                    </div>
-                                    <div>
-                                        <h3 className="text-lg sm:text-xl font-semibold">Drop images here or click to browse</h3>
-                                        <p className="text-xs sm:text-sm text-muted-foreground mt-2">
-                                            Supports: <span className="font-medium">HEIC, RAW, TIFF, PNG, JPG, WebP</span> and more
-                                        </p>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* File Queue (Integrated into Settings) */}
-                        {files.length > 0 && (
-                            <div className="pt-4 border-t border-slate-100">
-                                <Card variant="glass" className="border-slate-200">
-                                    <CardHeader className="py-4">
-                                        <CardTitle className="flex items-center justify-between text-sm">
-                                            <span className="font-bold text-slate-700">Queue ({files.length})</span>
-                                            <div className="flex gap-2">
-                                                <Button variant="ghost" size="sm" className="h-7 text-[10px] uppercase font-bold tracking-wider" onClick={() => setFiles([])} disabled={isProcessing}>
-                                                    Clear All
-                                                </Button>
-                                            </div>
-                                        </CardTitle>
-                                    </CardHeader>
-                                    <CardContent className="space-y-2 p-3">
-                                        {isProcessing && (
-                                            <div className="mb-4 px-1">
-                                                <Progress value={progress} className="h-1" />
-                                            </div>
-                                        )}
-                                        {files.map((item, index) => (
-                                            <div key={index} className="flex items-center justify-between p-2.5 bg-slate-50 border border-slate-100 rounded-lg group">
-                                                <div className="flex items-center gap-3 overflow-hidden flex-1">
-                                                    <div className="w-8 h-8 bg-white rounded flex items-center justify-center shrink-0 shadow-sm">
-                                                        <ImageIcon className="w-4 h-4 text-slate-400 group-hover:text-primary transition-colors" />
-                                                    </div>
-                                                    <div className="min-w-0 flex-1">
-                                                        <p className="font-bold text-[11px] text-slate-700 truncate">{item.file.name}</p>
-                                                        <p className="text-[10px] text-slate-400 font-medium">
-                                                            {item.originalSize}
-                                                            {item.newSize && <span className="text-green-600 ml-1.5">→ {item.newSize}</span>}
-                                                        </p>
-                                                    </div>
-                                                </div>
-                                                <div className="flex items-center gap-2 shrink-0">
-                                                    {item.status === 'processing' && <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />}
-                                                    {item.status === 'done' && <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />}
-                                                    {item.status === 'pending' && <Button size="icon" variant="ghost" className="h-7 w-7 text-slate-300 hover:text-red-500" onClick={() => removeFile(index)}><X className="w-3.5 h-3.5" /></Button>}
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </CardContent>
-                                </Card>
-                            </div>
-                        )}
-                    </div>
-                </div>
+                <SettingsPanel
+                    currentMode={mode}
+                    files={files}
+                    setFiles={setFiles}
+                    removeFile={removeFile}
+                    isProcessing={isProcessing}
+                    processFiles={processFiles}
+                    isReady={isReady}
+                    loadProgress={mode === 'compress' ? compressorProgress : magickProgress}
+                    progress={progress}
+                    getRootProps={getRootProps}
+                    getInputProps={getInputProps}
+                    isDragActive={isDragActive}
+                    // State
+                    targetFormat={targetFormat} setTargetFormat={setTargetFormat}
+                    targetSizeKB={targetSizeKB} setTargetSizeKB={setTargetSizeKB}
+                    resizeMode={resizeMode} setResizeMode={setResizeMode}
+                    resizeWidth={resizeWidth} setResizeWidth={setResizeWidth}
+                    resizeHeight={resizeHeight} setResizeHeight={setResizeHeight}
+                    resizePercentage={resizePercentage} setResizePercentage={setResizePercentage}
+                    rotateAngle={rotateAngle} setRotateAngle={setRotateAngle}
+                    flipDirection={flipDirection} setFlipDirection={setFlipDirection}
+                    downloadMode={downloadMode} setDownloadMode={setDownloadMode}
+                    cropAspectRatio={cropAspectRatio} setCropAspectRatio={setCropAspectRatio}
+                    brightness={brightness} setBrightness={setBrightness}
+                    contrast={contrast} setContrast={setContrast}
+                    saturation={saturation} setSaturation={setSaturation}
+                    resetAdjustments={() => {
+                        setBrightness(100);
+                        setContrast(100);
+                        setSaturation(100);
+                    }}
+                    selectedFilter={selectedFilter} setSelectedFilter={setSelectedFilter}
+                    watermarkType={watermarkType} setWatermarkType={setWatermarkType}
+                    watermarkText={watermarkText} setWatermarkText={setWatermarkText}
+                    watermarkImage={watermarkImage} handleWatermarkImageUpload={handleWatermarkImageUpload}
+                    watermarkPosition={watermarkPosition} setWatermarkPosition={setWatermarkPosition}
+                    watermarkSize={watermarkSize} setWatermarkSize={setWatermarkSize}
+                    watermarkOpacity={watermarkOpacity} setWatermarkOpacity={setWatermarkOpacity}
+                    splitRows={splitRows} setSplitRows={setSplitRows}
+                    splitCols={splitCols} setSplitCols={setSplitCols}
+                    selectedFileIndex={selectedFileIndex} setSelectedFileIndex={setSelectedFileIndex}
+                />
             </Tabs>
         </div>
     );
